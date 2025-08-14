@@ -100,4 +100,223 @@
     </div>
   </div>
 
-  <!-- 右下のフローティング現
+  <!-- 右下のフローティング現在地ボタン（親指で押しやすい） -->
+  <button id="fab-recenter" title="現在地へ">📍</button>
+
+  <!-- PWA: Service Worker 登録 -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch(()=>{});
+    }
+  </script>
+
+  <!-- 依存ライブラリ -->
+  <script src="leaflet.js"></script>
+  <script src="jszip.min.js"></script>
+  <script src="togeojson.umd.js"></script>
+
+  <script>
+    // --- Leaflet マップ初期化 ---
+    const map = L.map('map', { zoomControl: true }).setView([35.0, 135.0], 14);
+
+    // OSM タイル（単一ホスト + CORS 指定）※SWがキャッシュ
+    const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      crossOrigin: true,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    // --- 状態 ---
+    let threshold = 100;                // 通知距離（m）
+    let points = [];                    // {latlng, name, desc, announced}
+    let watchId = null;
+    let meLayer = null;                 // 現在地表示
+    let routeLayer = null, pointLayer = null;
+    let lastHere = null;                // 最終現在地
+    let follow = true;                  // 自動追従
+
+    // --- 要素 ---
+    const elTh   = document.getElementById('th');
+    const elThV  = document.getElementById('thv');
+    const elStat = document.getElementById('stat');
+    const elFollow = document.getElementById('follow');
+    const togglePanelBtn = document.getElementById('togglePanel');
+    const panel = document.getElementById('panel');
+
+    // --- UI イベント ---
+    togglePanelBtn.addEventListener('click', () => {
+      panel.classList.toggle('compact');
+    });
+
+    elTh.addEventListener('input', () => {
+      threshold = +elTh.value;
+      elThV.textContent = `${threshold}m`;
+    });
+
+    elFollow.addEventListener('change', () => {
+      follow = elFollow.checked;
+      if (follow && lastHere) map.setView(lastHere);
+    });
+
+    document.getElementById('recenter').addEventListener('click', recenterNow);
+    document.getElementById('fab-recenter').addEventListener('click', recenterNow);
+    function recenterNow() {
+      if (lastHere) {
+        follow = true;
+        elFollow.checked = true;
+        map.setView(lastHere, map.getZoom() < 16 ? 16 : map.getZoom());
+      } else {
+        // 最初の位置取得（単発）
+        navigator.geolocation.getCurrentPosition(
+          pos => {
+            const here = L.latLng(pos.coords.latitude, pos.coords.longitude);
+            map.setView(here, 16);
+          },
+          err => alert('位置取得に失敗: ' + err.message),
+          { enableHighAccuracy: true, timeout: 10000 }
+        );
+      }
+    }
+
+    document.getElementById('tts').addEventListener('click', () => speak('音声テストです'));
+
+    document.getElementById('clear').addEventListener('click', () => {
+      if (routeLayer) map.removeLayer(routeLayer);
+      if (pointLayer) map.removeLayer(pointLayer);
+      points = [];
+    });
+
+    document.getElementById('track').addEventListener('click', () => {
+      if (watchId) navigator.geolocation.clearWatch(watchId);
+      watchId = navigator.geolocation.watchPosition(onPos, onErr, {
+        enableHighAccuracy: true, maximumAge: 1000, timeout: 15000
+      });
+    });
+
+    document.getElementById('stop').addEventListener('click', () => {
+      if (watchId) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+      elStat.textContent = '';
+    });
+
+    document.getElementById('file').addEventListener('change', onFile);
+
+    // 地図を触ったら自動追従 OFF
+    map.on('dragstart zoomstart', () => { follow = false; elFollow.checked = false; });
+
+    // --- ユーティリティ ---
+    function speak(text) {
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'ja-JP';
+      try { speechSynthesis.speak(u); } catch {}
+    }
+
+    function dist(a, b) {
+      const R = 6371000, toRad = d => d * Math.PI/180;
+      const dlat = toRad(b.lat - a.lat), dlon = toRad(b.lng - a.lng);
+      const s = Math.sin(dlat/2)**2 + Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.sin(dlon/2)**2;
+      return 2 * R * Math.asin(Math.sqrt(s));
+    }
+
+    function stripHtml(html) {
+      if (!html) return '';
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      return (tmp.textContent || tmp.innerText || '').trim();
+    }
+
+    // --- KML/KMZ ローダ ---
+    async function onFile(ev) {
+      const f = ev.target.files[0];
+      if (!f) return;
+
+      const isKMZ = /\.kmz$/i.test(f.name);
+      let kmlText = null;
+
+      try {
+        if (isKMZ) {
+          const buf = await f.arrayBuffer();
+          const zip = await JSZip.loadAsync(buf);
+          let kmlEntry = null;
+          zip.forEach((p, entry) => { if (!kmlEntry && p.toLowerCase().endsWith('.kml')) kmlEntry = entry; });
+          if (!kmlEntry) return alert('KMZ内にKMLが見つかりません。');
+          kmlText = await kmlEntry.async('string');
+        } else {
+          kmlText = await f.text();
+        }
+      } catch (e) {
+        alert('ファイル読み込みに失敗: ' + e.message);
+        return;
+      }
+
+      const kmlDom = new DOMParser().parseFromString(kmlText, 'text/xml');
+      const gj = toGeoJSON.kml(kmlDom);
+
+      // 既存レイヤ削除
+      if (routeLayer) map.removeLayer(routeLayer);
+      if (pointLayer) map.removeLayer(pointLayer);
+      points = [];
+
+      // ルート（LineString / MultiLineString）
+      const lineFeats = gj.features.filter(ft => ft.geometry && /Line/i.test(ft.geometry.type));
+      const lines = lineFeats.map(ft =>
+        L.polyline(ft.geometry.coordinates.map(c => [c[1], c[0]]), { color:'#2b8a3e', weight:4 })
+      );
+      if (lines.length) routeLayer = L.layerGroup(lines).addTo(map);
+
+      // チェックポイント（Point）
+      const ptFeats = gj.features.filter(ft => ft.geometry && ft.geometry.type === 'Point');
+      pointLayer = L.geoJSON({ type: 'FeatureCollection', features: ptFeats }, {
+        pointToLayer: (ft, latlng) => L.circleMarker(latlng, {
+          radius: 7, color:'#1e3a8a', weight: 2, fillColor:'#60a5fa', fillOpacity:.9
+        }),
+        onEachFeature: (ft, layer) => {
+          const name = (ft.properties && ft.properties.name) ? stripHtml(ft.properties.name) : 'チェックポイント';
+          const descRaw = (ft.properties && ft.properties.description) ? ft.properties.description : '';
+          const desc = stripHtml(descRaw);
+          layer.bindPopup(`<b>${name}</b><br>${desc}`);
+          points.push({ latlng: layer.getLatLng(), name, desc, announced: false });
+        }
+      }).addTo(map);
+
+      // ビュー合わせ
+      const group = [];
+      if (routeLayer) group.push(routeLayer);
+      if (pointLayer) group.push(pointLayer);
+      if (group.length) {
+        const g = L.featureGroup(group);
+        map.fitBounds(g.getBounds().pad(0.2));
+      }
+    }
+
+    // --- 現在地処理 ---
+    function onPos(pos) {
+      const { latitude, longitude, accuracy, speed } = pos.coords;
+      const here = L.latLng(latitude, longitude);
+      lastHere = here;
+
+      elStat.textContent = `精度 ${Math.round(accuracy||0)}m / 速度 ${speed!=null ? Math.round(speed*3.6) : '-'}km/h`;
+
+      if (!meLayer) {
+        meLayer = L.circleMarker(here, { radius: 8, color:'#dc2626', weight:3, fillColor:'#fecaca', fillOpacity:1 })
+          .addTo(map);
+      } else {
+        meLayer.setLatLng(here);
+      }
+
+      if (follow) map.panTo(here, { animate: false });
+
+      // 距離判定（未通知のみ）
+      for (const p of points) {
+        if (p.announced) continue;
+        if (dist(here, p.latlng) <= threshold) {
+          p.announced = true;
+          speak(`${p.name}。 ${p.desc}`);
+        }
+      }
+    }
+    function onErr(err) {
+      alert('位置取得に失敗: ' + err.message);
+    }
+  </script>
+</body>
+</html>
