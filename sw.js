@@ -1,96 +1,72 @@
-// ---- PWA + Runtime tile cache (improved) ----
-const VERSION = 'v1.1.0';
-const STATIC_CACHE = `static-${VERSION}`;
-const TILE_CACHE   = `tiles-${VERSION}`;
-const MAX_TILES    = 800;               // タイルの最大保存数（必要に応じて調整）
-
-// この SW が配信されているベース URL（GitHub Pages でも OK）
-const BASE = self.registration.scope;   // 例: https://username.github.io/repo/
-
-// 事前キャッシュする静的資産
-const APP_ASSETS_REL = [
+// Simple PWA + runtime tile cache (mobile friendly)
+const CACHE_NAME = 'route-aid-v2';
+const APP_ASSETS = [
   './',
   './index.html',
   './leaflet.js',
   './leaflet.css',
   './jszip.min.js',
-  './togeojson.umd.js',
-  './manifest.webmanifest'
+  './togeojson.umd.js'
 ];
 
-// 相対 → 絶対 URL に正規化（スコープ配下に確実に一致させる）
-const APP_ASSETS = APP_ASSETS_REL.map(p => new URL(p, BASE).href);
-
-self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(STATIC_CACHE)
-      .then(cache => cache.addAll(APP_ASSETS))
-      .then(() => self.skipWaiting())
-  );
+self.addEventListener('install', (e) => {
+  self.skipWaiting();
+  e.waitUntil(caches.open(CACHE_NAME).then((c) => c.addAll(APP_ASSETS)));
 });
 
-self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys
-        .filter(k => k !== STATIC_CACHE && k !== TILE_CACHE)
-        .map(k => caches.delete(k))
-      )
+self.addEventListener('activate', (e) => {
+  e.waitUntil(
+    caches.keys().then((keys) =>
+      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
     ).then(() => self.clients.claim())
   );
 });
 
-// タイルを SWR で取得し、件数制限をかける
-async function staleWhileRevalidateTile(request) {
-  const cache = await caches.open(TILE_CACHE);
-  const cached = await cache.match(request);
-  const network = fetch(request, { mode: 'cors' })
-    .then(async (resp) => {
-      if (resp && resp.status === 200) {
-        try {
-          await cache.put(request, resp.clone());
-          // タイル枚数を制限（FIFO）
-          const keys = await cache.keys();
-          if (keys.length > MAX_TILES) {
-            await cache.delete(keys[0]);
-          }
-        } catch {}
-      }
-      return resp;
-    })
-    .catch(() => null);
-
-  return cached || network || new Response('', { status: 504 });
-}
-
-self.addEventListener('fetch', (event) => {
-  const req = event.request;
+self.addEventListener('fetch', (e) => {
+  const req = e.request;
   const url = new URL(req.url);
 
-  // 1) OSM タイル
-  if (url.hostname.endsWith('tile.openstreetmap.org')) {
-    event.respondWith(staleWhileRevalidateTile(req));
-    return;
-  }
+  // GitHub Pages配下の自アプリ資産は常にキャッシュ優先
+  const isAppAsset =
+    url.origin === location.origin &&
+    (APP_ASSETS.includes(`.${url.pathname}`) || url.pathname.endsWith('/'));
 
-  // 2) 自サイトの静的資産はキャッシュ優先
-  if (APP_ASSETS.includes(url.href)) {
-    event.respondWith(
-      caches.match(req).then(cached => cached || fetch(req))
-    );
-    return;
-  }
+  // OSM タイル（サブドメイン無しのURL想定）
+  const isOsmTile = url.hostname === 'tile.openstreetmap.org';
 
-  // 3) ナビゲーション（ページ遷移）はオフライン時に index.html を返す
-  if (req.mode === 'navigate') {
-    event.respondWith(
-      fetch(req).catch(() => caches.match(new URL('./index.html', BASE).href))
-    );
-    return;
-  }
+  if (!isAppAsset && !isOsmTile) return; // それ以外は素通し
 
-  // 4) それ以外はネット優先（失敗時はキャッシュ）
-  event.respondWith(
-    fetch(req).catch(() => caches.match(req))
+  e.respondWith(
+    (async () => {
+      // まずキャッシュ
+      const cached = await caches.match(req, { ignoreSearch: true });
+      if (cached) {
+        // バックグラウンドで更新（Stale-While-Revalidate）
+        fetch(req)
+          .then((resp) => {
+            if (resp && (resp.ok || resp.type === 'opaque')) {
+              caches.open(CACHE_NAME).then((c) => c.put(req, resp.clone()));
+            }
+          })
+          .catch(() => {});
+        return cached;
+      }
+
+      // キャッシュ無いときはネット→成功したら保存、失敗ならフォールバック
+      try {
+        const resp = await fetch(req);
+        if (resp && (resp.ok || resp.type === 'opaque')) {
+          const c = await caches.open(CACHE_NAME);
+          c.put(req, resp.clone());
+        }
+        return resp;
+      } catch (err) {
+        // タイルなら何も返せない（灰色のまま）が、アプリは index にフォールバック
+        if (isAppAsset) {
+          return caches.match('./index.html');
+        }
+        throw err;
+      }
+    })()
   );
 });
