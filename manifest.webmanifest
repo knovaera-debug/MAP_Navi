@@ -1,9 +1,0 @@
-{
-  "name": "実車評価支援ツール",
-  "short_name": "評価ツール",
-  "start_url": "./index.html",
-  "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#0ea5e9",
-  "icons": []
-}
