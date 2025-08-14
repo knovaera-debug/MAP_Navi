@@ -1,164 +1,103 @@
 <!doctype html>
 <html lang="ja">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>実車評価支援ツール</title>
-<link rel="manifest" href="manifest.webmanifest">
-<meta name="theme-color" content="#0ea5e9">
-<link rel="stylesheet" href="leaflet.css">
-<style>
-html,body,#map{height:100%;margin:0}
-#panel{position:absolute;top:10px;left:10px;z-index:1000;background:#fff;padding:10px 12px;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.2);font-family:system-ui, sans-serif;min-width:260px}
-#panel h1{font-size:14px; margin:0 0 6px; font-weight:700}
-#panel .row{display:flex; gap:6px; align-items:center; margin:6px 0; flex-wrap:wrap}
-#panel label{font-size:12px}
-.badge{display:inline-block;background:#eef;border:1px solid #ccd;border-radius:6px;padding:1px 6px;font-size:11px}
-.small{font-size:11px;color:#555}
-button{cursor:pointer}
-#recenter{background:#0ea5e9;color:#fff;border:none;border-radius:8px;padding:6px 10px}
-.toggle{display:inline-flex;align-items:center;gap:6px}
-</style>
+  <meta charset="utf-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover"
+  />
+  <title>実車評価支援ツール</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.webmanifest" />
+  <meta name="theme-color" content="#0ea5e9" />
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="leaflet.css" />
+
+  <style>
+    :root { --ui-bg:#fff; --ui-shadow: 0 6px 24px rgba(0,0,0,.18); }
+    html,body,#map { height: 100%; margin: 0; }
+    #map { background:#f2f2f2; }
+
+    /* 上部パネル */
+    #panel {
+      position: absolute; inset: 10px auto auto 10px;
+      z-index: 1000; background: var(--ui-bg);
+      padding: 10px 12px; border-radius: 14px; box-shadow: var(--ui-shadow);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif;
+      min-width: 280px; max-width: min(94vw, 420px);
+    }
+    #panel h1 { margin: 0 0 8px; font-size: 14px; font-weight: 700; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+    label { font-size: 12px; }
+    .small { font-size: 11px; color: #555; }
+    .badge { display:inline-block; padding:2px 6px; background:#eef; border:1px solid #ccd; border-radius: 6px; font-size: 11px; }
+    button, input[type="file"] { font: inherit; }
+    button { cursor: pointer; padding: 6px 10px; border-radius: 10px; border: 1px solid #ddd; background:#fff; }
+    #track { background:#16a34a; color:#fff; border-color:#16a34a; }
+    #stop { background:#ef4444; color:#fff; border-color:#ef4444; }
+    #recenter { background:#0ea5e9; color:#fff; border-color:#0ea5e9; }
+
+    /* 右下のフローティング「現在地へ」 */
+    #fab-recenter {
+      position: absolute; right: 14px; bottom: 14px; z-index: 1000;
+      width: 50px; height: 50px; border-radius: 50%;
+      display:grid; place-items:center;
+      background:#0ea5e9; color:#fff; box-shadow: var(--ui-shadow); border:none;
+      font-size: 20px; cursor: pointer;
+    }
+
+    /* スライダー */
+    input[type="range"] { width: 100%; }
+
+    /* モバイルでパネルが邪魔な時にたたむ */
+    #togglePanel {
+      position:absolute; left:10px; top:10px; z-index:1001;
+      background:#0ea5e9; color:#fff; border:none; border-radius: 10px;
+      box-shadow: var(--ui-shadow); padding:6px 10px; display:none;
+    }
+    @media (max-width: 640px) {
+      #togglePanel { display:block; }
+      #panel.compact { display: none; }
+    }
+  </style>
 </head>
 <body>
-<div id="map"></div>
-<div id="panel">
-  <h1>実車評価支援ツール</h1>
-  <div class="row">
-    <input type="file" id="file" accept=".kml,.kmz">
-    <button id="clear">クリア</button>
+  <div id="map"></div>
+
+  <button id="togglePanel">メニュー</button>
+
+  <div id="panel">
+    <h1>実車評価支援ツール</h1>
+
+    <div class="row">
+      <input type="file" id="file" accept=".kml,.kmz" />
+      <button id="clear">クリア</button>
+    </div>
+
+    <div class="row">
+      <button id="track">位置追跡を開始</button>
+      <button id="stop">停止</button>
+      <button id="recenter">現在地へ</button>
+      <label style="display:inline-flex; align-items:center; gap:6px;">
+        <input type="checkbox" id="follow" checked /> 自動追従
+      </label>
+    </div>
+
+    <div class="row">
+      <label>通知距離: <span id="thv" class="badge">100m</span></label>
+      <input id="th" type="range" min="20" max="300" value="100" />
+    </div>
+
+    <div class="row">
+      <button id="tts">音声テスト</button>
+      <span class="small" id="stat"></span>
+    </div>
+
+    <div class="small">
+      ※ オンライン時に表示した地図は自動的に端末へキャッシュされ、圏外でも表示されます。
+    </div>
   </div>
-  <div class="row">
-    <button id="track">位置追跡を開始</button>
-    <button id="stop">停止</button>
-    <button id="recenter">現在地へ</button>
-    <label class="toggle"><input type="checkbox" id="follow" checked> 自動追従</label>
-  </div>
-  <div class="row"><label>通知距離: <span id="thv" class="badge">100m</span></label></div>
-  <input id="th" type="range" min="20" max="300" value="100" style="width:100%">
-  <div class="row"><button id="tts">音声テスト</button><span class="small" id="stat"></span></div>
-  <div class="small">※ オンライン時に表示した地図は自動で端末にキャッシュされ、電波圏外でも表示されます。</div>
-</div>
-<script>
-// PWA: Service Worker 登録
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js');
-}
-</script>
-<script src="leaflet.js"></script>
-<script src="jszip.min.js"></script>
-<script src="togeojson.umd.js"></script>
-<script>
-const map = L.map('map', { zoomControl: true }).setView([35.0, 135.0], 14);
-// OSM背景（オンライン時）。SWがキャッシュし、以後はオフラインでも表示。
-const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19,
-  attribution: '&copy; OpenStreetMap contributors'
-}).addTo(map);
 
-let threshold = 100;
-let points = [];
-let watchId = null;
-let meLayer = null;
-let routeLayer = null, pointLayer = null;
-let lastHere = null;
-let follow = true;
-
-const elTh = document.getElementById('th');
-const elThV = document.getElementById('thv');
-const elStat = document.getElementById('stat');
-const elFollow = document.getElementById('follow');
-
-elTh.addEventListener('input', ()=>{ threshold = +elTh.value; elThV.textContent = threshold + 'm'; });
-elFollow.addEventListener('change', ()=>{ follow = elFollow.checked; if (follow && lastHere) map.setView(lastHere); });
-document.getElementById('recenter').addEventListener('click', ()=>{ if(lastHere){ follow = true; elFollow.checked = true; map.setView(lastHere); } });
-document.getElementById('tts').addEventListener('click', ()=> speak('音声テストです'));
-document.getElementById('clear').addEventListener('click', ()=>{
-  if(routeLayer) map.removeLayer(routeLayer);
-  if(pointLayer) map.removeLayer(pointLayer);
-  points = [];
-});
-document.getElementById('track').addEventListener('click', ()=>{
-  if(watchId) navigator.geolocation.clearWatch(watchId);
-  watchId = navigator.geolocation.watchPosition(onPos, onErr, {enableHighAccuracy:true, maximumAge:1000, timeout:10000});
-});
-document.getElementById('stop').addEventListener('click', ()=>{
-  if(watchId){ navigator.geolocation.clearWatch(watchId); watchId=null; elStat.textContent=''; }
-});
-document.getElementById('file').addEventListener('change', onFile);
-map.on('dragstart zoomstart', ()=>{ follow = false; elFollow.checked = false; });
-
-function speak(text){
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = 'ja-JP';
-  speechSynthesis.speak(u);
-}
-function dist(a,b){
-  const R = 6371000; const toRad = d=> d * Math.PI/180;
-  const dlat = toRad(b.lat-a.lat), dlon = toRad(b.lng-a.lng);
-  const s = Math.sin(dlat/2)**2 + Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.sin(dlon/2)**2;
-  return 2*R*Math.asin(Math.sqrt(s));
-}
-async function onFile(ev){
-  const f = ev.target.files[0];
-  if(!f) return;
-  const isKMZ = /\.kmz$/i.test(f.name);
-  let kmlText = null;
-  if(isKMZ){
-    const buf = await f.arrayBuffer();
-    const zip = await JSZip.loadAsync(buf);
-    let kmlEntry = null;
-    zip.forEach((p, entry)=>{ if(!kmlEntry && p.toLowerCase().endsWith('.kml')) kmlEntry = entry; });
-    if(!kmlEntry) return alert('KMZ内にKMLがありません');
-    kmlText = await kmlEntry.async('string');
-  } else {
-    kmlText = await f.text();
-  }
-  const kmlDom = new DOMParser().parseFromString(kmlText, 'text/xml');
-  const gj = toGeoJSON.kml(kmlDom);
-
-  if(routeLayer) map.removeLayer(routeLayer);
-  if(pointLayer) map.removeLayer(pointLayer);
-  points = [];
-
-  const lineFeats = gj.features.filter(ft => ft.geometry && ft.geometry.type.includes('Line'));
-  const lines = lineFeats.map(ft => L.polyline(ft.geometry.coordinates.map(c=>[c[1], c[0]]), {color:'#2b8a3e', weight:4}));
-  routeLayer = L.layerGroup(lines).addTo(map);
-
-  const ptFeats = gj.features.filter(ft => ft.geometry && ft.geometry.type === 'Point');
-  pointLayer = L.geoJSON({type:'FeatureCollection', features: ptFeats}, {
-    pointToLayer: (ft, latlng)=> L.circleMarker(latlng, {radius:7, color:'#1e3a8a', weight:2, fillColor:'#60a5fa', fillOpacity:.85}),
-    onEachFeature: (ft, layer)=>{
-      const name = ft.properties.name || 'チェックポイント';
-      const desc = ft.properties.description || '';
-      layer.bindPopup(`<b>${name}</b><br>${desc}`);
-      points.push({latlng: layer.getLatLng(), name, desc, announced:false});
-    }
-  }).addTo(map);
-
-  const group = L.featureGroup([routeLayer, pointLayer]);
-  map.fitBounds(group.getBounds().pad(0.2));
-}
-function onPos(pos){
-  const {latitude, longitude, accuracy, speed} = pos.coords;
-  const here = L.latLng(latitude, longitude);
-  lastHere = here;
-  elStat.textContent = `精度 ${Math.round(accuracy||0)}m / 速度 ${speed!=null?Math.round(speed*3.6):'-'}km/h`;
-  if(!meLayer){
-    meLayer = L.circleMarker(here, {radius:8, color:'#dc2626', weight:3, fillColor:'#fecaca', fillOpacity:1}).addTo(map);
-  }else{
-    meLayer.setLatLng(here);
-  }
-  if(follow){ map.panTo(here, {animate:false}); }
-  for(const p of points){
-    if(p.announced) continue;
-    if(dist(here, p.latlng) <= threshold){
-      p.announced = true;
-      speak(p.name + '。 ' + p.desc);
-    }
-  }
-}
-function onErr(err){ alert('位置取得に失敗: ' + err.message); }
-</script>
-</body>
-</html>
+  <!-- 右下のフローティング現
